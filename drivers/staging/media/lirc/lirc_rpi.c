@@ -9,6 +9,8 @@
  *
  * Copyright (C) 2012 Aron Robert Szabo <aron@reon.hu>,
  *		      Michael Bishop <cleverca22@gmail.com>
+ * 2017 Andreas Christ <software@quantentunnel.de>
+ *      Added hardware pulse-wave modulation
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
@@ -25,6 +27,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
 #include <linux/sched.h>
@@ -60,6 +63,124 @@
 			       fmt, ## args);			\
 	} while (0)
 
+/* for pulse-width modulation */
+#define pwm_clock_freq     19200000
+/* for low level pin access that the gpio system does not seem to handle;
+   copied and modified from
+   http://blogsmayan.blogspot.ch/p/programming-interrupts-in-raspberry-pi.html
+   and from wiringPi.com */
+/* Define Raspberry Pi board */
+#ifndef RPI
+   #define RPI 3
+#endif
+/* set base address of RPi peripherals */
+#ifndef RPI
+   #error "RPI must be #defined as the model number of the raspberry pi"
+#elif RPI==0
+   #define RASPBERRY_PI_PERI_BASE  0x20000000
+#elif RPI==1
+   #define RASPBERRY_PI_PERI_BASE  0x20000000
+#elif RPI==2
+   #define RASPBERRY_PI_PERI_BASE  0x3F000000
+#elif RPI==3
+   #define RASPBERRY_PI_PERI_BASE  0x3F000000
+#else
+   #error "RPI must be #defined as integer of the used RPi version (0 - 3)"
+#endif
+// offsets into RASPBERRY_PI_PERI_BASE
+#define CLOCK_OFFSET            0x101000
+#define GPIO_OFFSET             0x200000
+#define PWM_OFFSET              0x20C000
+//#define BLOCK_SIZE 		(4*1024)
+/* from  wiringPi/wiringPi.c and .h */
+// BCM Magic
+#define	BCM_PASSWORD	0x5A000000
+/* codes for alternate functions of pins */
+#define	FSEL_ALT0		0b100
+#define	FSEL_ALT1		0b101
+#define	FSEL_ALT2		0b110
+#define	FSEL_ALT3		0b111
+#define	FSEL_ALT4		0b011
+#define	FSEL_ALT5		0b010
+//	Word offsets into the PWM control region
+#define	PWM_CONTROL 0
+#define	PWM_STATUS  1
+#define	PWM0_RANGE  4
+#define	PWM0_DATA   5
+#define	PWM1_RANGE  8
+#define	PWM1_DATA   9
+//	Clock regsiter offsets
+#define	PWMCLK_CNTL	40
+#define	PWMCLK_DIV	41
+/* values */
+#define	PWM_MODE_MS		 0
+#define	PWM_MODE_BAL	 1
+#define	PWM0_MS_MODE    0x0080  // Run in MS mode
+#define	PWM0_USEFIFO    0x0020  // Data from FIFO
+#define	PWM0_REVPOLAR   0x0010  // Reverse polarity
+#define	PWM0_OFFSTATE   0x0008  // Ouput Off state
+#define	PWM0_REPEATFF   0x0004  // Repeat last value if FIFO empty
+#define	PWM0_SERIAL     0x0002  // Run in serial mode
+#define	PWM0_ENABLE     0x0001  // Channel Enable
+#define	PWM1_MS_MODE    0x8000  // Run in MS mode
+#define	PWM1_USEFIFO    0x2000  // Data from FIFO
+#define	PWM1_REVPOLAR   0x1000  // Reverse polarity
+#define	PWM1_OFFSTATE   0x0800  // Ouput Off state
+#define	PWM1_REPEATFF   0x0400  // Repeat last value if FIFO empty
+#define	PWM1_SERIAL     0x0200  // Run in serial mode
+#define	PWM1_ENABLE     0x0100  // Channel Enable
+// Locals to hold pointers to the hardware
+// gpioToGPFSEL:	Map a BCM_GPIO pin to it's Function Selection control port.
+// (GPFSEL 0-5) Groups of 10 - 3 bits per Function - 30 bits per port
+static uint8_t gpioToGPFSEL [] = {
+  0,0,0,0,0,0,0,0,0,0,
+  1,1,1,1,1,1,1,1,1,1,
+  2,2,2,2,2,2,2,2,2,2,
+  3,3,3,3,3,3,3,3,3,3,
+  4,4,4,4,4,4,4,4,4,4,
+  5,5,5,5,5,5,5,5,5,5,
+} ;
+// gpioToShift: Define the shift up for the 3 bits per pin in each GPFSEL port
+static uint8_t gpioToShift [] = {
+  0,3,6,9,12,15,18,21,24,27,
+  0,3,6,9,12,15,18,21,24,27,
+  0,3,6,9,12,15,18,21,24,27,
+  0,3,6,9,12,15,18,21,24,27,
+  0,3,6,9,12,15,18,21,24,27,
+  0,3,6,9,12,15,18,21,24,27,
+} ;
+// gpioToPwmALT: the ALT value to put a GPIO pin into PWM mode
+static uint8_t gpioToPwmALT [] = {
+          0,         0,         0,         0,         0,         0, 0, 0,
+          0,         0,         0,         0, FSEL_ALT0, FSEL_ALT0, 0, 0,
+          0,         0, FSEL_ALT5, FSEL_ALT5,         0,         0, 0, 0,
+          0,         0,         0,         0,         0,         0, 0, 0,
+          0,         0,         0,         0,         0,         0, 0, 0,
+  FSEL_ALT0, FSEL_ALT0,         0,         0,         0, FSEL_ALT0, 0, 0,
+          0,         0,         0,         0,         0,         0, 0, 0,
+          0,         0,         0,         0,         0,         0, 0, 0,
+} ;
+// gpioToPwmPort: the port value to put a GPIO pin into PWM mode
+static uint8_t gpioToPwmPort [] = {
+          0,         0,         0,         0,         0,         0, 0, 0,
+          0,         0,         0,         0, PWM0_DATA, PWM1_DATA, 0, 0,
+          0,         0, PWM0_DATA, PWM1_DATA,         0,         0, 0, 0,
+          0,         0,         0,         0,         0,         0, 0, 0,
+          0,         0,         0,         0,         0,         0, 0, 0,
+  PWM0_DATA, PWM1_DATA,         0,         0,         0, PWM1_DATA, 0, 0,
+          0,         0,         0,         0,         0,         0, 0, 0,
+          0,         0,         0,         0,         0,         0, 0, 0,
+} ;
+/* for ioremap, as per http://blogsmayan.blogspot.ch/p/
+   programming-interrupts-in-raspberry-pi.html  */
+struct bcm2835_peripheral {
+    unsigned long addr_p;
+    int mem_fd;
+    void *map;
+    volatile unsigned int *addr;
+};
+struct bcm2835_peripheral p_gpio, p_pwm, p_clk;
+
 /* module parameters */
 
 /* set the default GPIO input pin */
@@ -72,6 +193,8 @@ static bool debug;
 static int sense = -1;
 /* use softcarrier by default */
 static bool softcarrier = 1;
+/* do not use pwmcarrier by default */
+static bool pwmcarrier = 0;
 /* 0 = do not invert output, 1 = invert output */
 static bool invert = 0;
 
@@ -93,7 +216,7 @@ static spinlock_t lock;
 static unsigned int freq = 38000;
 static unsigned int duty_cycle = 50;
 static unsigned long period;
-static unsigned long pulse_width;
+static unsigned long pulse_width = 0;
 static unsigned long space_width;
 
 static void safe_udelay(unsigned long usecs)
@@ -112,9 +235,97 @@ static unsigned long read_current_us(void)
 	return (now.tv_sec * 1000000) + (now.tv_nsec/1000);
 }
 
+static unsigned int best_pulse_width( unsigned int range,
+                                      unsigned int new_duty_cycle )
+{
+   unsigned int too_low, too_high;
+   too_low = range * new_duty_cycle / 100;
+   if ( too_low == 0 ) return 1;
+   too_high = too_low + 1;
+   return new_duty_cycle - too_low * 100 / new_duty_cycle
+        < too_high * 100 / new_duty_cycle - new_duty_cycle? too_low : too_high;
+}
+
 static int init_timing_params(unsigned int new_duty_cycle,
 	unsigned int new_freq)
 {
+	if (duty_cycle == new_duty_cycle && freq == new_freq && pulse_width > 0)
+	   return 0;	// no changes; pulse_width > 0, thus function run already
+	if (pwmcarrier) {
+      unsigned int range;
+      uint32_t pwm_control;
+      unsigned int divisor;
+      divisor = (unsigned int) -1;
+      if (new_freq == 0) { /* unmodulated signal */
+         divisor = 50;    /* any divisor and range will do */
+         range = 2;
+         pulse_width = range;
+      } else {
+         /* Optimal divisor and range: minimal deviation from new_duty_cycle
+            and new_freq; high divisor to keep the stress on the chip low.
+            Arbitrary decision: 2.9% deviation from new_freq and 5.9% from
+            new_duty_cycle are ok; else minimize sum of the two deviations.*/
+         unsigned int error_freq, error_duty, error_sum;
+         unsigned int d;
+		   printk(KERN_INFO LIRC_DRIVER_NAME
+		       ": determine optimal pwm settings for freq %u and duty_cycle %u\n",
+		       new_freq, new_duty_cycle);
+         error_sum = (unsigned int) -1; // a high number
+         for (d = pwm_clock_freq / new_freq / 2 + 1; d >= 1; d--) {
+            //dprintk("try d=%u\n", d);
+            range = DIV_ROUND_CLOSEST( pwm_clock_freq, new_freq );
+            range = DIV_ROUND_CLOSEST( range, d );
+            //dprintk("thus range=%u\n", range);
+            if (range > 1) {
+               error_freq = pwm_clock_freq / d / range; // achieved frequency
+               error_freq = error_freq > new_freq ? error_freq - new_freq
+                                                  : new_freq - error_freq;
+               error_freq = error_freq * 100 / new_freq;       // relative error
+               //dprintk("error_freq=%u\n", error_freq);
+               pulse_width = best_pulse_width( range, new_duty_cycle );
+               error_duty = pulse_width * 100 / range; // achieved duty_cycle
+               error_duty = error_duty > new_duty_cycle ? error_duty - new_duty_cycle
+                                                        : new_duty_cycle - error_duty;
+               error_duty = error_duty * 100 / new_duty_cycle; // relative error
+               //dprintk("error_duty=%u\n", error_duty);
+               if (error_freq <= 2 && error_duty <= 5 ) { // small errors
+                  divisor = d;
+                  break;                                  // --> accept
+               }
+               if ( (error_freq + error_duty) < error_sum ) { // best so far
+                  error_sum = error_freq + error_duty;
+                  divisor = d;
+               }
+            }
+         }
+         range = DIV_ROUND_CLOSEST( pwm_clock_freq, new_freq );
+         range = DIV_ROUND_CLOSEST( range, divisor );
+         pulse_width = best_pulse_width( range, new_duty_cycle );
+         if (pulse_width == 0) pulse_width = 1;
+			space_width = invert ? range : 0;
+      }
+      /* following code in analogy to wiringPi.c */
+      pwm_control = *(p_pwm.addr + PWM_CONTROL);		// preserve PWM_CONTROL
+      // stop PWM prior to stopping PWM clock in MS mode otherwise BUSY
+      // stays high.
+      *(p_pwm.addr + PWM_CONTROL) = 0 ;				// Stop PWM
+      // Stop PWM clock before changing divisor
+      *(p_clk.addr + PWMCLK_CNTL) = BCM_PASSWORD | 0x01 ;	// Stop PWM Clock
+      udelay(110) ;			// prevents clock going sloooow
+      while ((*(p_clk.addr + PWMCLK_CNTL) & 0x80) != 0)	// Wait to be !BUSY
+             udelay(1) ;
+      *(p_clk.addr + PWMCLK_DIV)  = BCM_PASSWORD | (divisor << 12);
+      *(p_clk.addr + PWMCLK_CNTL) = BCM_PASSWORD | 0x11;	// Start PWM clock
+      *(p_pwm.addr + PWM_CONTROL) = pwm_control;		// restore PWM_CONTROL
+      *(p_pwm.addr + PWM0_RANGE) = range; udelay(10);
+      *(p_pwm.addr + PWM1_RANGE) = range; udelay(10);
+		printk(KERN_INFO LIRC_DRIVER_NAME
+		       ": set pwm divisor to %u, range to %u, pulse_width to %lu; "
+		       "space_width is %lu\n",
+              divisor, range, pulse_width, space_width);
+		duty_cycle = new_duty_cycle;
+		freq = new_freq;
+   } else { // i.e., not pwmcarrier
 	if (1000 * 1000000L / new_freq * new_duty_cycle / 100 <=
 	    LIRC_TRANSMITTER_LATENCY)
 		return -EINVAL;
@@ -128,6 +339,7 @@ static int init_timing_params(unsigned int new_duty_cycle,
 	space_width = period - pulse_width;
 	dprintk("in init_timing_params, freq=%d pulse=%ld, "
 		"space=%ld\n", freq, pulse_width, space_width);
+   }
 	return 0;
 }
 
@@ -170,6 +382,13 @@ static long send_pulse(unsigned long length)
 	if (length <= 0)
 		return 0;
 
+	if (pwmcarrier) {
+      // printk(KERN_INFO LIRC_DRIVER_NAME ": send pwm pulse of %lu ms\n", length);
+		*(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = pulse_width;
+		safe_udelay(length);
+		// *(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = 0;
+		return 0;
+   } else
 	if (softcarrier) {
 		return send_pulse_softcarrier(length);
 	} else {
@@ -181,6 +400,8 @@ static long send_pulse(unsigned long length)
 
 static void send_space(long length)
 {
+   if (pwmcarrier) *(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = space_width;
+	else
 	gpiochip->set(gpiochip, gpio_out_pin, invert);
 	if (length <= 0)
 		return;
@@ -347,6 +568,13 @@ static int init_port(void)
 	int i, nlow, nhigh;
 	struct device_node *node;
 
+   dprintk("init_port entered\n");
+   dprintk("softcarrier %d\n", softcarrier);
+   dprintk("pwmcarrier %d\n", pwmcarrier);
+   dprintk("out_pin %d\n", gpio_out_pin);
+   dprintk("in_pin %d\n", gpio_in_pin);
+   dprintk("debug %d\n", debug);
+
 	node = lirc_rpi_dev->dev.of_node;
 
 	gpiochip = gpiochip_find("bcm2708_gpio", is_right_chip);
@@ -387,7 +615,45 @@ static int init_port(void)
 		return -EINVAL;
 	}
 
+   printk ( KERN_INFO LIRC_DRIVER_NAME ": setting carrier up, if needed" );
+	if (pwmcarrier == 0)
 	gpiochip->set(gpiochip, gpio_out_pin, invert);
+   else {  /* pwmcarrier is requested */
+      int fSel, shift, alt;
+      /* Map the individual hardware components, as per wiringPi.c, but using
+         structure of blog (as this is a kernel module) */
+      //	GPIO:
+      p_gpio.map = ioremap(RASPBERRY_PI_PERI_BASE + GPIO_OFFSET, BLOCK_SIZE);
+      if ( !p_gpio.map ) {
+			printk(KERN_ALERT LIRC_DRIVER_NAME ": cant ioremap gpio\n");
+			return -ENODEV;
+		}
+      p_gpio.addr = (volatile unsigned int*)p_gpio.map;
+      //	PWM
+      p_pwm.map = ioremap(RASPBERRY_PI_PERI_BASE + PWM_OFFSET, BLOCK_SIZE);
+      if ( !p_pwm.map ) {
+			printk(KERN_ALERT LIRC_DRIVER_NAME ": cant ioremap pwm\n");
+			return -ENODEV;
+		}
+      p_pwm.addr = (volatile unsigned int*)p_pwm.map;
+      //	Clock control
+      p_clk.map = ioremap(RASPBERRY_PI_PERI_BASE + CLOCK_OFFSET, BLOCK_SIZE);
+      if ( !p_clk.map ) {
+			printk(KERN_ALERT LIRC_DRIVER_NAME ": cant ioremap clk\n");
+			return -ENODEV;
+		}
+      p_clk.addr = (volatile unsigned int*)p_clk.map;
+  		printk(KERN_INFO LIRC_DRIVER_NAME ": ioremap gpio %p, pwm %p, clk %p\n",
+             p_gpio.map, p_pwm.map, p_clk.map);
+      alt = gpioToPwmALT [gpio_out_pin];
+      fSel = gpioToGPFSEL [gpio_out_pin];
+      shift = gpioToShift [gpio_out_pin];
+      *(p_gpio.addr + fSel) =
+                     (*(p_gpio.addr + fSel) & ~(7 << shift)) | (alt << shift);
+      udelay(110);
+      *(p_pwm.addr + PWM_CONTROL) =
+                PWM0_ENABLE | PWM1_ENABLE | PWM0_MS_MODE | PWM1_MS_MODE;
+   }
 
 	irq_num = gpiochip->to_irq(gpiochip, gpio_in_pin);
 	dprintk("to_irq %d\n", irq_num);
@@ -485,6 +751,8 @@ static ssize_t lirc_write(struct file *file, const char *buf,
 	wbuf = memdup_user(buf, n);
 	if (IS_ERR(wbuf))
 		return PTR_ERR(wbuf);
+	printk(KERN_INFO LIRC_DRIVER_NAME ": start %d pulses and spaces at %lu",
+                                     count, read_current_us());
 	spin_lock_irqsave(&lock, flags);
 
 	for (i = 0; i < count; i++) {
@@ -493,9 +761,13 @@ static ssize_t lirc_write(struct file *file, const char *buf,
 		else
 			delta = send_pulse(wbuf[i]);
 	}
+	if (pwmcarrier) *(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = space_width;
+	else
 	gpiochip->set(gpiochip, gpio_out_pin, invert);
 
 	spin_unlock_irqrestore(&lock, flags);
+	printk(KERN_INFO LIRC_DRIVER_NAME ": sequence sent completed at %lu",
+	                                  read_current_us() );
 	kfree(wbuf);
 	return n;
 }
@@ -647,15 +919,41 @@ static void lirc_rpi_exit(void)
 		platform_device_unregister(lirc_rpi_dev);
 	platform_driver_unregister(&lirc_rpi_driver);
 	lirc_buffer_free(&rbuf);
+
+   /* release the mappings for pwm */
+   if (p_gpio.addr) iounmap(p_gpio.addr);
+   if (p_pwm.addr) iounmap(p_pwm.addr);
+   if (p_clk.addr) iounmap(p_clk.addr);
 }
 
 static int __init lirc_rpi_init_module(void)
 {
 	int result;
-
+   dprintk("lirc_rpi_init_module entered\n");
+   dprintk("softcarrier %d\n", softcarrier);
+   dprintk("pwmcarrier %d\n", pwmcarrier);
+   dprintk("out_pin %d\n", gpio_out_pin);
+   dprintk("in_pin %d\n", gpio_in_pin);
+   dprintk("debug %d\n", debug);
 	result = lirc_rpi_init();
 	if (result)
 		return result;
+
+   // check parameters related to pwmcarrier
+   if (pwmcarrier) {
+      if (softcarrier) { 
+         result = -EINVAL;
+	   	printk(KERN_ERR LIRC_DRIVER_NAME
+			       ": softcarrier and pwmcarrier are mutually exclusive.\n");
+		   goto exit_rpi;
+      }
+      if (gpioToPwmALT[gpio_out_pin] == 0) {
+			result = -EINVAL;
+			printk(KERN_ERR LIRC_DRIVER_NAME
+				       ": GPIO out-pin %d is no pwm pin!\n", gpio_out_pin);
+			goto exit_rpi;
+      }
+   }
 
 	result = init_port();
 	if (result < 0)
@@ -704,6 +1002,7 @@ module_exit(lirc_rpi_exit_module);
 MODULE_DESCRIPTION("Infra-red receiver and blaster driver for Raspberry Pi GPIO.");
 MODULE_AUTHOR("Aron Robert Szabo <aron@reon.hu>");
 MODULE_AUTHOR("Michael Bishop <cleverca22@gmail.com>");
+MODULE_AUTHOR("Andreas Christ <software@quantentunnel.de>");
 MODULE_LICENSE("GPL");
 
 module_param(gpio_out_pin, int, S_IRUGO);
@@ -720,6 +1019,9 @@ MODULE_PARM_DESC(sense, "Override autodetection of IR receiver circuit"
 
 module_param(softcarrier, bool, S_IRUGO);
 MODULE_PARM_DESC(softcarrier, "Software carrier (0 = off, 1 = on, default on)");
+
+module_param(pwmcarrier, bool, S_IRUGO);
+MODULE_PARM_DESC(pwmcarrier, "Hardware pulse-width modulation as carrier (0 = off, 1 = on, default off)");
 
 module_param(invert, bool, S_IRUGO);
 MODULE_PARM_DESC(invert, "Invert output (0 = off, 1 = on, default off");
