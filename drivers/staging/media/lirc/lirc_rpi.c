@@ -193,8 +193,8 @@ static bool debug;
 static int sense = -1;
 /* use softcarrier by default */
 static bool softcarrier = 1;
-/* do not use pwmcarrier by default */
-static bool pwmcarrier = 0;
+/* do not use hardpwm by default */
+static bool hardpwm = 0;
 /* 0 = do not invert output, 1 = invert output */
 static bool invert = 0;
 
@@ -249,15 +249,20 @@ static unsigned int best_pulse_width( unsigned int range,
 static int init_timing_params(unsigned int new_duty_cycle,
 	unsigned int new_freq)
 {
+   // printk(KERN_INFO LIRC_DRIVER_NAME ": init_timing_params entered\n");
+   // printk(KERN_INFO LIRC_DRIVER_NAME ": softcarrier %d\n", softcarrier);
+   // printk(KERN_INFO LIRC_DRIVER_NAME ": hardpwm %d\n", hardpwm);
+   // printk(KERN_INFO LIRC_DRIVER_NAME ": out_pin %d\n", gpio_out_pin);
+   // printk(KERN_INFO LIRC_DRIVER_NAME ": in_pin %d\n", gpio_in_pin);
 	if (duty_cycle == new_duty_cycle && freq == new_freq && pulse_width > 0)
 	   return 0;	// no changes; pulse_width > 0, thus function run already
-	if (pwmcarrier) {
+	if (hardpwm) {
       unsigned int range;
       uint32_t pwm_control;
       unsigned int divisor;
       divisor = (unsigned int) -1;
-      if (new_freq == 0) { /* unmodulated signal */
-         divisor = 50;    /* any divisor and range will do */
+      if (new_freq == 0 || new_duty_cycle == 100) { /* unmodulated signal */
+         divisor = 500;    /* any divisor and range will do */
          range = 2;
          pulse_width = range;
       } else {
@@ -325,7 +330,7 @@ static int init_timing_params(unsigned int new_duty_cycle,
               divisor, range, pulse_width, space_width);
 		duty_cycle = new_duty_cycle;
 		freq = new_freq;
-   } else { // i.e., not pwmcarrier
+   } else { // i.e., not hardpwm
 	if (1000 * 1000000L / new_freq * new_duty_cycle / 100 <=
 	    LIRC_TRANSMITTER_LATENCY)
 		return -EINVAL;
@@ -382,8 +387,8 @@ static long send_pulse(unsigned long length)
 	if (length <= 0)
 		return 0;
 
-	if (pwmcarrier) {
-      // printk(KERN_INFO LIRC_DRIVER_NAME ": send pwm pulse of %lu ms\n", length);
+	if (hardpwm) {
+      // printk(KERN_INFO LIRC_DRIVER_NAME ": send hardpwm pulse of %lu ms\n", length);
 		*(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = pulse_width;
 		safe_udelay(length);
 		// *(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = 0;
@@ -400,7 +405,7 @@ static long send_pulse(unsigned long length)
 
 static void send_space(long length)
 {
-   if (pwmcarrier) *(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = space_width;
+   if (hardpwm) *(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = space_width;
 	else
 	gpiochip->set(gpiochip, gpio_out_pin, invert);
 	if (length <= 0)
@@ -570,7 +575,7 @@ static int init_port(void)
 
    dprintk("init_port entered\n");
    dprintk("softcarrier %d\n", softcarrier);
-   dprintk("pwmcarrier %d\n", pwmcarrier);
+   dprintk("hardpwm %d\n", hardpwm);
    dprintk("out_pin %d\n", gpio_out_pin);
    dprintk("in_pin %d\n", gpio_in_pin);
    dprintk("debug %d\n", debug);
@@ -616,9 +621,9 @@ static int init_port(void)
 	}
 
    printk ( KERN_INFO LIRC_DRIVER_NAME ": setting carrier up, if needed" );
-	if (pwmcarrier == 0)
+	if (hardpwm == 0)
 	gpiochip->set(gpiochip, gpio_out_pin, invert);
-   else {  /* pwmcarrier is requested */
+   else {  /* hardpwm is requested */
       int fSel, shift, alt;
       /* Map the individual hardware components, as per wiringPi.c, but using
          structure of blog (as this is a kernel module) */
@@ -761,7 +766,7 @@ static ssize_t lirc_write(struct file *file, const char *buf,
 		else
 			delta = send_pulse(wbuf[i]);
 	}
-	if (pwmcarrier) *(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = space_width;
+	if (hardpwm) *(p_pwm.addr + gpioToPwmPort[gpio_out_pin]) = space_width;
 	else
 	gpiochip->set(gpiochip, gpio_out_pin, invert);
 
@@ -931,7 +936,7 @@ static int __init lirc_rpi_init_module(void)
 	int result;
    dprintk("lirc_rpi_init_module entered\n");
    dprintk("softcarrier %d\n", softcarrier);
-   dprintk("pwmcarrier %d\n", pwmcarrier);
+   dprintk("hardpwm %d\n", hardpwm);
    dprintk("out_pin %d\n", gpio_out_pin);
    dprintk("in_pin %d\n", gpio_in_pin);
    dprintk("debug %d\n", debug);
@@ -939,12 +944,12 @@ static int __init lirc_rpi_init_module(void)
 	if (result)
 		return result;
 
-   // check parameters related to pwmcarrier
-   if (pwmcarrier) {
+   // check parameters related to hardpwm
+   if (hardpwm) {
       if (softcarrier) { 
          result = -EINVAL;
 	   	printk(KERN_ERR LIRC_DRIVER_NAME
-			       ": softcarrier and pwmcarrier are mutually exclusive.\n");
+			       ": softcarrier and hardpwm are mutually exclusive.\n");
 		   goto exit_rpi;
       }
       if (gpioToPwmALT[gpio_out_pin] == 0) {
@@ -1020,8 +1025,8 @@ MODULE_PARM_DESC(sense, "Override autodetection of IR receiver circuit"
 module_param(softcarrier, bool, S_IRUGO);
 MODULE_PARM_DESC(softcarrier, "Software carrier (0 = off, 1 = on, default on)");
 
-module_param(pwmcarrier, bool, S_IRUGO);
-MODULE_PARM_DESC(pwmcarrier, "Hardware pulse-width modulation as carrier (0 = off, 1 = on, default off)");
+module_param(hardpwm, bool, S_IRUGO);
+MODULE_PARM_DESC(hardpwm, "Hardware pulse-width modulation as carrier (0 = off, 1 = on, default off)");
 
 module_param(invert, bool, S_IRUGO);
 MODULE_PARM_DESC(invert, "Invert output (0 = off, 1 = on, default off");
